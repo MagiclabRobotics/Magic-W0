@@ -6,7 +6,7 @@
 
 *Magic-Lab Team · Magiclab Robotics Inc.*
 
-<a href="https://embodied.magiclab.top/works/wam/magic-w0/index.html"><img src="https://img.shields.io/badge/Website-Project_Page-blue" alt="Project Homepage"></a> <a href="https://github.com/MagiclabRobotics/Magic-W0"><img src="https://img.shields.io/badge/Repository-GitHub-black?logo=github" alt="GitHub Repository"></a> <img src="https://img.shields.io/badge/Code_%26_Weights-Coming_Soon-lightgrey" alt="Code and weights coming soon"> <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-green" alt="MIT License"></a>
+<a href="https://embodied.magiclab.top/works/wam/magic-w0/index.html"><img src="https://img.shields.io/badge/Website-Project_Page-blue" alt="Project Homepage"></a> <a href="https://github.com/MagiclabRobotics/Magic-W0"><img src="https://img.shields.io/badge/Repository-GitHub-black?logo=github" alt="GitHub Repository"></a> <a href="https://huggingface.co/Flyfish101/Magic-W0"><img src="https://img.shields.io/badge/🤗_Weights-Coming_Soon-yellow" alt="Hugging Face weights — coming soon"></a> <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-green" alt="MIT License"></a>
 
 [Update News](#update-news) · [Abstract](#abstract) · [Key Features](#key-features) · [Getting Started](#getting-started)
 
@@ -50,7 +50,7 @@ Coming soon: environment requirements, dependency installation, and a setup chec
 
 ### Model Checkpoints
 
-Coming soon: checkpoint downloads, required assets, and model loading examples.
+Pretrained weights will be released on [🤗 Hugging Face](https://huggingface.co/Flyfish101/Magic-W0). Coming soon: checkpoint downloads, required assets, and model loading examples.
 
 ### Data Preparation
 
