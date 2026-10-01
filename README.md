@@ -6,7 +6,9 @@
 
 *Magic-Lab Team · Magiclab Robotics Inc.*
 
-<a href="https://embodied.magiclab.top/works/wam/magic-w0/index.html"><img src="https://img.shields.io/badge/Website-Project_Page-blue" alt="Project Homepage"></a> <a href="https://github.com/MagiclabRobotics/Magic-W0"><img src="https://img.shields.io/badge/Repository-GitHub-black?logo=github" alt="GitHub Repository"></a> <a href="https://huggingface.co/Flyfish101/Magic-W0"><img src="https://img.shields.io/badge/🤗_Weights-Coming_Soon-yellow" alt="Hugging Face weights — coming soon"></a> <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-green" alt="MIT License"></a>
+<a href="https://embodied.magiclab.top/works/wam/magic-w0/index.html"><img src="https://img.shields.io/badge/Website-Project_Page-blue" alt="Project Homepage"></a> <a href="https://github.com/MagiclabRobotics/Magic-W0"><img src="https://img.shields.io/badge/Repository-GitHub-black?logo=github" alt="GitHub Repository"></a> <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-green" alt="MIT License"></a>
+<br>
+<a href="https://huggingface.co/Flyfish101/Magic-W0"><img src="https://img.shields.io/badge/%F0%9F%A4%97_Model-HuggingFace-yellow" alt="Model on HuggingFace"></a>
 
 [Update News](#update-news) · [Abstract](#abstract) · [Key Features](#key-features) · [Getting Started](#getting-started)
 
@@ -46,11 +48,22 @@ Code and pretrained weights are coming soon. Setup and usage instructions will b
 
 ### Installation
 
-Coming soon: environment requirements, dependency installation, and a setup check.
+Requires Linux, Python 3.11, and CUDA-enabled PyTorch. These steps apply once the source code is released.
+
+```bash
+git clone https://github.com/MagiclabRobotics/Magic-W0.git
+cd Magic-W0
+conda create -n magic-w0 python=3.11 -y
+conda activate magic-w0
+
+# Install a PyTorch build compatible with your CUDA environment first.
+python -m pip install -r requirements.txt
+python -m pip install -e '.[multimodal]'
+```
 
 ### Model Checkpoints
 
-Pretrained weights will be released on [🤗 Hugging Face](https://huggingface.co/Flyfish101/Magic-W0). Coming soon: checkpoint downloads, required assets, and model loading examples.
+Model weights: [🤗 Hugging Face](https://huggingface.co/Flyfish101/Magic-W0).
 
 ### Data Preparation
 
