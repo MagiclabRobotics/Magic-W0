@@ -1,2 +1,15 @@
 # Confidential technical report: do not include in public releases.
 magic-w0-technical-report.pdf
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+
+# Local model material is never committed.
+checkpoints/
+runs/
+eval_diagnostics/
+.DS_Store
+*.egg-info/
+build/
+dist/

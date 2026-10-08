@@ -1,0 +1,8 @@
+Magic-W0
+
+The existing rotation helpers in eval/robodojo/rotation6d.py retain their
+Apache-2.0 notice. See LICENSES/Apache-2.0.txt for the license text.
+
+Qwen3.5 assets retain their upstream LICENSE when prepared. RoboDojo/XPolicyLab
+and their simulator dependencies are external components with their own licenses.
+The repository's MIT license does not replace those notices or licenses.

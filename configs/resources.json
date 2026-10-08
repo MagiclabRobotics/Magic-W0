@@ -1,0 +1,13 @@
+{
+  "qwen_assets": {
+    "repo_id": "Qwen/Qwen3.5-2B",
+    "revision": "15852e8c16360a2fea060d615a32b45270f8a8fc",
+    "files": ["config.json", "tokenizer.json", "tokenizer_config.json", "vocab.json", "merges.txt", "preprocessor_config.json", "video_preprocessor_config.json", "chat_template.jinja", "LICENSE"]
+  },
+  "checkpoint": {
+    "repo_id": "Flyfish101/Magic-W0",
+    "filename": "magic_w0_robodojo.pt",
+    "checked_revision": "c03c32f61afc99c8d79d8d2c40a49ba70c314f19",
+    "available_at_checked_revision": false
+  }
+}

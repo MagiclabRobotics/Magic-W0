@@ -1,0 +1,38 @@
+policy_name: Magic_W0
+protocol: ws
+host: localhost
+port: null
+bench_name: null
+task_name: null
+seed: 0
+eval_batch: true
+
+# Resource paths are relative to the Magic-W0 repository.
+robodojo_root: null
+vlm_checkpoint: checkpoints/qwen3.5-2b-assets
+checkpoint_path: checkpoints/magic_w0_robodojo.pt
+
+normalization_source: RoboDojo
+device: cuda
+attention_implementation: sdpa
+num_inference_steps: 10
+reuse_initial_noise: false
+
+env_cfg_type: arx_x5
+# The provided checkpoint uses camera_ee.
+action_type: camera_ee
+camera_eef_layout: auto
+embodiment: arx_x5_sim
+execute_steps: 20
+
+# execute_steps must divide the checkpoint history_interval.
+
+clip_normalized_actions: true
+max_joint_step: null
+max_eef_translation_step: null
+max_gripper_step: null
+
+action_diagnostics: false
+action_diagnostics_interval: 10
+save_model_inputs: false
+save_model_input_sequence: false

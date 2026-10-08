@@ -18,7 +18,8 @@
 
 ## 📣 Update News
 
-- **[2026-09-30]** Added the project overview. Code and pretrained checkpoints are coming soon.
+- **[2026-10-05]** Added the RoboDojo inference adapter and deployment configuration.
+- **[2026-09-30]** Added the project overview.
 
 <a name="abstract"></a>
 
@@ -37,49 +38,63 @@ Magic-W0 learns structured world transitions and continuous robot actions from d
 - 🌍 **World–action modeling:** learn geometry, motion, future semantics, and continuous control together.
 - 🤖 **Cross-embodiment data:** use a shared 34D state–action interface with masks for missing dimensions.
 - ⚡ **Teacher-free policy execution:** use Track4World and DINOv3 supervision during training without running these teachers at inference.
-- 🛠️ **Configurable training workflows:** adapt YAML recipes for pretraining, fine-tuning, and distributed execution.
-- 🔍 **Checkpoint diagnostics:** check inference contracts and evaluate generated actions and world representations.
+- 🕒 **Visual history:** retain checkpoint-configured past observations independently for each environment.
+- 🛠️ **RoboDojo integration:** serve batched actions with checkpoint validation, normalization, and camera-frame EEF conversion.
 
 <a name="getting-started"></a>
 
 ## 🚀 Getting Started
 
-Code and pretrained weights are coming soon. Setup and usage instructions will be added alongside the source release.
+This repository provides the Magic-W0 inference runtime and RoboDojo adapter.
+Training and fine-tuning recipes will be released separately.
 
 ### Installation
 
-Requires Linux, Python 3.11, and CUDA-enabled PyTorch. These steps apply once the source code is released.
+Use Linux, Python 3.11, and an NVIDIA GPU. Run from the repository root:
 
 ```bash
-git clone https://github.com/MagiclabRobotics/Magic-W0.git
-cd Magic-W0
 conda create -n magic-w0 python=3.11 -y
 conda activate magic-w0
-
-# Install a PyTorch build compatible with your CUDA environment first.
-python -m pip install -r requirements.txt
-python -m pip install -e '.[multimodal]'
+bash scripts/install.sh
 ```
 
-### Model Checkpoints
+The installer uses PyTorch 2.5.1 / CUDA 12.1. Install RoboDojo, Isaac Sim, assets,
+and the required XPolicyLab extensions in a separate simulator environment;
+see the [inference guide](docs/robodojo.md).
 
-Model weights: [🤗 Hugging Face](https://huggingface.co/Flyfish101/Magic-W0).
+### Model Resources
 
-### Data Preparation
+Model repository: [🤗 Hugging Face](https://huggingface.co/Flyfish101/Magic-W0).
+Prepare a compatible local policy checkpoint and the pinned Qwen configuration,
+tokenizer, and processor assets:
 
-Coming soon: supported data formats, custom dataset configuration, and normalization instructions.
+```bash
+python scripts/prepare_resources.py \
+  --checkpoint-source /path/to/magic_w0_robodojo.pt \
+  --download-qwen
+python scripts/prepare_resources.py --check
+```
 
-### Training and Fine-tuning
+Files are prepared under `checkpoints/`. Qwen base model weights are unnecessary;
+the policy checkpoint contains the learned VLM tensors.
 
-Coming soon: training configurations, single-node and multi-node launch commands, fine-tuning, and checkpoint resumption.
+### RoboDojo Evaluation
 
-### Inference and Deployment
+```bash
+export ROBODOJO_ROOT=/path/to/RoboDojo
+bash eval/robodojo/run.sh \
+  --task stack_bowls --seed 0 --episodes 10 \
+  --policy-name Magic_W0_Local \
+  --policy-gpu 0 --env-gpu 1 --sim-env RoboDojo
+```
 
-Coming soon: a minimal inference example, observation preparation, action decoding, and robot integration instructions.
-
-### Evaluation
-
-Coming soon: checkpoint diagnostics, benchmark setup, and evaluation commands.
+For a single GPU, use `--env-gpu 0` and reduce the simulator's environment count.
+Select the simulator configuration with `--env-config YOUR_ARX_ENV_CONFIG`.
+Add `--dry-run` to inspect the launch commands. Deployment defaults are in
+[`configs/robodojo.yaml`](configs/robodojo.yaml): **10 inference steps** and
+**20 executed actions per replan**. Logs and resolved settings are saved under
+`runs/robodojo/`; task success is recorded in RoboDojo's native result files.
+See the [inference guide](docs/robodojo.md) for resource overrides and multiple tasks.
 
 ## 🙏 Acknowledgements
 
@@ -87,18 +102,19 @@ We thank the Hugging Face and LeRobot communities for their infrastructure and t
 
 ## 📚 Citation
 
-If you find Magic-W0 useful for your research, please cite the project:
+If you find Magic-W0 useful for your research, please cite our paper:
 
 ```bibtex
-@misc{magiclab2026magicw0,
-  title        = {Magic-W0: A Structured World--Action Foundation Model for Physical Intelligence},
-  author       = {Chen, Xuhua and Yin, Zhenhan and Zhang, Yuan and Zhang, Tao and others},
-  year         = {2026},
-  howpublished = {GitHub repository},
-  url          = {https://github.com/MagiclabRobotics/Magic-W0}
+@article{chen2026magicw0,
+  title   = {Magic-W0: A Structured World--Action Foundation Model for Physical Intelligence},
+  author  = {Chen, Xuhua and Yin, Zhenhan and Zhang, Yuan and Zhang, Tao and others},
+  journal = {arXiv preprint arXiv:2609.39870},
+  year    = {2026},
+  url     = {https://arxiv.org/abs/2609.39870}
 }
 ```
 
 ## 📜 License
 
 Released under the **MIT License**. See [LICENSE](LICENSE) for the full terms.
+Third-party components retain their own licenses; see [NOTICE](NOTICE).
