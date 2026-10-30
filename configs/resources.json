@@ -1,0 +1,23 @@
+{
+  "qwen_assets": {
+    "repo_id": "Qwen/Qwen3.5-2B",
+    "revision": "15852e8c16360a2fea060d615a32b45270f8a8fc",
+    "files": [
+      "config.json",
+      "tokenizer.json",
+      "tokenizer_config.json",
+      "vocab.json",
+      "merges.txt",
+      "preprocessor_config.json",
+      "video_preprocessor_config.json",
+      "chat_template.jinja",
+      "LICENSE"
+    ]
+  },
+  "checkpoint": {
+    "repo_id": "XuhuaX/Magic-W0",
+    "filename": "robodojo_sft_models/magic_w0_robodojo.pt",
+    "checked_revision": "78e6afa2f07550c602bd6538fb99cb8a0b8f913f",
+    "available_at_checked_revision": true
+  }
+}

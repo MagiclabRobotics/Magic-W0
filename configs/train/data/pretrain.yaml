@@ -1,0 +1,56 @@
+# Example data contract: adapt paths and mappings to your own export.
+data:
+  lerobot_version: v2.1
+  batch_size: 1
+  num_workers: 4
+  seed: 42
+  eval_fraction: 0.0
+  eval_on_train: true
+  datasets:
+  - type: dataset_group
+    name: pretrain_robots
+    modality: robotics
+    mixing_level: sample
+    sampling_mode: weighted_replacement
+    weight_mode: explicit
+    sources:
+    - type: lerobot
+      modality: robotics
+      weight: 1.0
+      root: ${MAGIC_W0_DATA_ROOT:-data}/robot_a
+      video_backend: pyav
+      params:
+        chunk_size: 50
+        embodiment: unknown
+        camera_keys: &id001 [observation.images.cam_high, observation.images.cam_left_wrist, observation.images.cam_right_wrist]
+        state_key: observation.state
+        action_key: action
+        target_state_dim: 34
+        target_action_dim: 34
+        action_representation: chunk_delta
+        action_delta_indices: [0, 1, 2, 3, 4, 5, 6, 8, 9, 10, 11, 12, 13, 14, 16, 17, 18, 19, 20, 21,
+          22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33]
+        action_rotation_groups:
+        - [19, 20, 21, 22, 23, 24]
+        - [28, 29, 30, 31, 32, 33]
+        norm_stats_path: ${MAGIC_W0_CACHE_ROOT:-.cache/magic_w0}/norm/robot_a.json
+    - type: lerobot
+      modality: robotics
+      weight: 1.0
+      root: ${MAGIC_W0_DATA_ROOT:-data}/robot_b
+      video_backend: pyav
+      params:
+        chunk_size: 50
+        embodiment: unknown
+        camera_keys: *id001
+        state_key: observation.state
+        action_key: action
+        target_state_dim: 34
+        target_action_dim: 34
+        action_representation: chunk_delta
+        action_delta_indices: [0, 1, 2, 3, 4, 5, 6, 8, 9, 10, 11, 12, 13, 14, 16, 17, 18, 19, 20, 21,
+          22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33]
+        action_rotation_groups:
+        - [19, 20, 21, 22, 23, 24]
+        - [28, 29, 30, 31, 32, 33]
+        norm_stats_path: ${MAGIC_W0_CACHE_ROOT:-.cache/magic_w0}/norm/robot_b.json

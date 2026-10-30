@@ -1,0 +1,1279 @@
+--- a/track4world/nets/blocks.py
++++ b/track4world/nets/blocks.py
+@@ -462,10 +462,12 @@
+             num_classes: int = 1000,
+             block: Optional[Callable[..., nn.Module]] = None,
+             norm_layer: Optional[Callable[..., nn.Module]] = None,
+-            init_weights=True):
++            init_weights=True,
++            pretrained_weights_path: str | None = None):
+         super().__init__()
+ 
+         self.init_weights = init_weights
++        self.pretrained_weights_path = pretrained_weights_path
+         
+         if not block_setting:
+             raise ValueError("The block_setting should not be empty")
+@@ -542,9 +544,15 @@
+                     nn.init.zeros_(m.bias)
+ 
+         if self.init_weights:
+-            # Load pre-trained weights from torchvision
+-            from torchvision.models import convnext_tiny, ConvNeXt_Tiny_Weights
+-            pretrained_dict = convnext_tiny(weights=ConvNeXt_Tiny_Weights.DEFAULT).state_dict()
++            if self.pretrained_weights_path:
++                pretrained_dict = torch.load(
++                    self.pretrained_weights_path,
++                    map_location="cpu",
++                )
++            else:
++                # Load pre-trained weights from torchvision.
++                from torchvision.models import convnext_tiny, ConvNeXt_Tiny_Weights
++                pretrained_dict = convnext_tiny(weights=ConvNeXt_Tiny_Weights.DEFAULT).state_dict()
+             model_dict = self.state_dict()
+             pretrained_dict = {k: v for k, v in pretrained_dict.items() if k in model_dict}
+ 
+@@ -1650,6 +1658,8 @@
+         pm_corr,
+         motion3d,
+         S,
++        return_motion_latent: bool = False,
++        skip_flow3d_prediction: bool = False,
+     ):
+         """
+         Args:
+@@ -1694,9 +1704,21 @@
+         # Refined 3D features
+         feat = self.final_conv(feat)
+ 
+-        # Predict relative 3D flow
+-        flow3d = self.head(torch.cat([feat, flow_3d_prior], dim=1))
+-
++        # Predict relative 3D flow. When requested, expose the hidden feature
++        # immediately before the final XYZ regression convolution.
++        head_input = torch.cat([feat, flow_3d_prior], dim=1) if self.use_prior else feat
++        motion_latent = self.head[:-1](head_input)
++        if skip_flow3d_prediction:
++            if not return_motion_latent:
++                raise ValueError(
++                    "skip_flow3d_prediction=True requires return_motion_latent=True"
++                )
++            flow3d = None
++        else:
++            flow3d = self.head[-1](motion_latent)
++
++        if return_motion_latent:
++            return flow3d, feat, motion_latent
+         return flow3d, feat
+ 
+ class RelUpdate3D34(nn.Module):
+--- a/track4world/nets/model.py
++++ b/track4world/nets/model.py
+@@ -1,8 +1,14 @@
+ from typing import List, Tuple, Union, Optional, Dict, Literal
+ from numbers import Number
++import hashlib
+ import importlib
++import json
++import os
++from pathlib import Path
++import tempfile
+ import warnings
+ import sys
++import time
+ 
+ import numpy as np
+ import torch
+@@ -24,11 +30,81 @@
+ )
+ from track4world.utils import misc
+ from track4world.nets.global_aggregator import Global_Aggregator
+-from track4world.nets.external.pi3.models.pi3 import Pi3
+ from track4world.nets.external.pi3x.models.pi3x import Pi3X
+ from track4world.nets.external.depth_anything_3.api import DepthAnything3
+ from track4world.utils.geometry_torch import mask_aware_nearest_resize
+ from track4world.utils.alignment import align_points_scale_xyz_shift
++
++
++def _resolve_depthanything3_model_path(
++    model_path: str,
++    local_files_only: bool,
++) -> str:
++    """Return a local ``from_pretrained`` directory for DA3 when running offline."""
++    if not local_files_only:
++        return model_path
++
++    path = Path(model_path).expanduser()
++    if not path.is_dir():
++        return str(path)
++    if (path / "config.json").is_file():
++        return str(path)
++
++    snapshots = path / "snapshots"
++    if snapshots.is_dir():
++        for snapshot in sorted(snapshots.iterdir()):
++            if (snapshot / "config.json").is_file():
++                return str(snapshot)
++
++    blobs = path / "blobs"
++    if not blobs.is_dir():
++        return str(path)
++
++    config_blob = None
++    model_blob = None
++    for candidate in blobs.iterdir():
++        if not candidate.is_file():
++            continue
++        if config_blob is None:
++            try:
++                with candidate.open("r", encoding="utf-8") as handle:
++                    payload = json.load(handle)
++                if isinstance(payload, dict):
++                    config_blob = candidate
++                    continue
++            except (OSError, UnicodeDecodeError, json.JSONDecodeError):
++                pass
++        if model_blob is None or candidate.stat().st_size > model_blob.stat().st_size:
++            model_blob = candidate
++
++    if config_blob is None or model_blob is None:
++        return str(path)
++
++    digest = hashlib.sha1(str(path.resolve()).encode("utf-8")).hexdigest()[:16]
++    view = Path(tempfile.gettempdir()) / "magicvla_depthanything3_local_views" / digest
++    view.mkdir(parents=True, exist_ok=True)
++    for target, source in {
++        "config.json": config_blob,
++        "model.safetensors": model_blob,
++    }.items():
++        link = view / target
++        if link.exists() or link.is_symlink():
++            continue
++        try:
++            os.symlink(source, link)
++        except FileExistsError:
++            pass
++    return str(view)
++
++
++def _profile_sync(device):
++    if torch.cuda.is_available() and torch.device(device).type == "cuda":
++        torch.cuda.synchronize(device)
++
++
++def _profile_now(device):
++    _profile_sync(device)
++    return time.perf_counter()
+ 
+ class ResidualConvBlock(nn.Module):
+     """
+@@ -109,9 +185,9 @@
+         extrinsics: (B, T, 3, 4), assumed to be OpenCV-style World-to-Camera (W2C)
+         intrinsics: (B, T, 3, 3)
+     Returns:
+-        world_points: (T, 3, H, W)
+-        camera_points: (T, 3, H, W)
+-        camera_poses: (T, 4, 4), Camera-to-World (C2W)
++        world_points: (B, T, 3, H, W)
++        camera_points: (B, T, 3, H, W)
++        camera_poses: (B, T, 4, 4), Camera-to-World (C2W)
+     """
+     B, T, H, W = depth.shape
+     device = depth.device
+@@ -154,8 +230,8 @@
+     # Stack to obtain camera-space points: (B, T, 3, H*W)
+     cam_points_flat = torch.stack([X_cam, Y_cam, Z_cam], dim=2)
+ 
+-    # Reshape for output: (B, T, 3, H, W) -> squeeze B -> (T, 3, H, W)
+-    camera_points = cam_points_flat.reshape(B, T, 3, H, W).squeeze(0)
++    # Keep the batch dimension stable even when B == 1.
++    camera_points = cam_points_flat.reshape(B, T, 3, H, W)
+ 
+     # ==========================================
+     # 3. Compute camera poses (W2C -> C2W)
+@@ -174,8 +250,8 @@
+     # Invert to obtain Camera-to-World (C2W) poses
+     c2w_4x4 = torch.inverse(w2c_4x4)
+ 
+-    # Output camera poses: (T, 4, 4)
+-    camera_poses = c2w_4x4.squeeze(0)
++    # Output camera poses: (B, T, 4, 4)
++    camera_poses = c2w_4x4
+ 
+     # ==========================================
+     # 4. Compute world-space points
+@@ -192,10 +268,47 @@
+     # (B, T, 3, 3) @ (B, T, 3, H*W) -> (B, T, 3, H*W)
+     world_points_flat = torch.matmul(R_c2w, cam_points_flat) + t_c2w
+ 
+-    # Reshape to output format: (T, 3, H, W)
+-    world_points = world_points_flat.reshape(B, T, 3, H, W).squeeze(0)
++    # Reshape to output format: (B, T, 3, H, W)
++    world_points = world_points_flat.reshape(B, T, 3, H, W)
+ 
+     return world_points, camera_points, camera_poses
++
++
++def normalize_geometry_per_sample(
++    points: torch.Tensor,
++    world_points: torch.Tensor,
++    camera_poses: torch.Tensor,
++    eps: float = 1e-6,
++):
++    """Normalize each sample frame group with one shared FP32 scale."""
++    if points.ndim != 5 or points.shape[2] != 3:
++        raise ValueError(f"points must be [B,T,3,H,W], got {tuple(points.shape)}")
++    if world_points.shape != points.shape:
++        raise ValueError(
++            "world_points must match points shape, got "
++            f"points={tuple(points.shape)}, world_points={tuple(world_points.shape)}"
++        )
++    if camera_poses.shape != (points.shape[0], points.shape[1], 4, 4):
++        raise ValueError(
++            "camera_poses must be [B,T,4,4], got "
++            f"{tuple(camera_poses.shape)} for points={tuple(points.shape)}"
++        )
++
++    point_norm = torch.linalg.vector_norm(points.float(), dim=2)
++    scale = point_norm.mean(dim=(1, 2, 3)).clamp_min(float(eps))
++    point_scale = scale[:, None, None, None, None]
++    pose_scale = scale[:, None, None]
++
++    # Divide in FP32, then preserve dtypes expected by the downstream feature path.
++    normalized_points = (points.float() / point_scale).to(dtype=points.dtype)
++    normalized_world_points = (world_points.float() / point_scale).to(
++        dtype=world_points.dtype
++    )
++    normalized_camera_poses = camera_poses.clone()
++    normalized_camera_poses[..., :3, 3] = (
++        camera_poses[..., :3, 3].float() / pose_scale
++    ).to(dtype=camera_poses.dtype)
++    return normalized_points, normalized_world_points, normalized_camera_poses, scale
+ 
+ 
+ class Head(nn.Module):
+@@ -615,6 +728,10 @@
+         mask_threshold: float = 0.5,
+         use_3d: bool = False,
+         use_model: Literal['base', 'pi3', 'depthanythingv3'] = 'base',
++        depthanythingv3_model_path: str = "depth-anything/DA3NESTED-GIANT-LARGE-1.1",
++        depthanythingv3_local_files_only: bool = False,
++        convnext_tiny_weights_path: str | None = None,
++        motion_chunk_size: int = 12,
+         **deprecated_kwargs
+     ):
+         super(Track4World, self).__init__()
+@@ -627,6 +744,12 @@
+         self.num_tokens_range = num_tokens_range
+         self.mask_threshold = mask_threshold
+         self.use_model = use_model
++        self.depthanythingv3_model_path = depthanythingv3_model_path
++        self.depthanythingv3_local_files_only = depthanythingv3_local_files_only
++        self.convnext_tiny_weights_path = convnext_tiny_weights_path
++        if int(motion_chunk_size) <= 0:
++            raise ValueError("motion_chunk_size must be positive")
++        self.motion_chunk_size = int(motion_chunk_size)
+         self.use_metric_scale = False  # toggled externally via --metric_scale
+         
+         # --- Backbone (DINOv2) and Feature Extractor ---
+@@ -677,7 +800,14 @@
+             self.flow_depth = 8
+             
+         elif use_model == 'depthanythingv3':
+-            self.backbone = DepthAnything3.from_pretrained("depth-anything/DA3NESTED-GIANT-LARGE-1.1")
++            depthanythingv3_model_path = _resolve_depthanything3_model_path(
++                self.depthanythingv3_model_path,
++                self.depthanythingv3_local_files_only,
++            )
++            self.backbone = DepthAnything3.from_pretrained(
++                depthanythingv3_model_path,
++                local_files_only=self.depthanythingv3_local_files_only,
++            )
+             self.patch_start_idx = 0
+             self.dim_feature = 1024
+             self.flow3d_dim = 256
+@@ -705,7 +835,30 @@
+             CNBlockConfig(192, 384, 3, False),
+             CNBlockConfig(384, None, 9, False),
+         ]
+-        self.ctx_encoder = ConvNeXt(block_setting, stochastic_depth_prob=0.0, init_weights=True)
++        if self.depthanythingv3_local_files_only and self.convnext_tiny_weights_path:
++            convnext_path = Path(self.convnext_tiny_weights_path).expanduser()
++            if not convnext_path.is_file():
++                raise FileNotFoundError(
++                    "ConvNeXt Tiny weights not found for offline Track4World loading: "
++                    f"{convnext_path}"
++                )
++            convnext_tiny_weights_path = str(convnext_path)
++        else:
++            convnext_tiny_weights_path = self.convnext_tiny_weights_path
++        # In offline mode the Track4World checkpoint loaded immediately after
++        # construction supplies the context-encoder weights. Avoid making
++        # torchvision fetch ConvNeXt-Tiny weights during construction when no
++        # explicit local ConvNeXt checkpoint was provided.
++        init_ctx_encoder_weights = not (
++            self.depthanythingv3_local_files_only
++            and convnext_tiny_weights_path is None
++        )
++        self.ctx_encoder = ConvNeXt(
++            block_setting,
++            stochastic_depth_prob=0.0,
++            init_weights=init_ctx_encoder_weights,
++            pretrained_weights_path=convnext_tiny_weights_path,
++        )
+         self.dot_conv = conv1x1(384, 128)
+         self.dot_fc1 = nn.Linear(self.dim_feature, self.flow_dim)
+         if use_3d:
+@@ -785,8 +938,13 @@
+ 
+         elif self.use_model == 'depthanythingv3':
+             # Depth Anything V3 backbone with Nested (metric) configuration
++            depthanythingv3_model_path = _resolve_depthanything3_model_path(
++                self.depthanythingv3_model_path,
++                self.depthanythingv3_local_files_only,
++            )
+             self.backbone = DepthAnything3.from_pretrained(
+-                "depth-anything/DA3NESTED-GIANT-LARGE-1.1"
++                depthanythingv3_model_path,
++                local_files_only=self.depthanythingv3_local_files_only,
+             )
+ 
+     def load_pretrained_with_remap(self, state_dict):
+@@ -843,7 +1001,9 @@
+         image: torch.Tensor, 
+         current_batch_size: int = 4, 
+         for_flow: bool = False,
+-        num_tokens: int = None
++        num_tokens: int = None,
++        return_intermediate_features: bool = False,
++        profile_intermediate_features: bool = False,
+     ) -> Union[Dict[str, torch.Tensor], Tuple[torch.Tensor, ...]]:
+         """
+         Unified feature and geometry extraction interface.
+@@ -878,6 +1038,7 @@
+             mode="bilinear", align_corners=False, antialias=True
+         )
+         H_14, W_14 = image_14.shape[-2:]
++        stage_timings = {} if return_intermediate_features else None
+ 
+         with torch.no_grad():
+             # -----------------------------------------
+@@ -942,28 +1103,60 @@
+                 camera_poses[..., :3, 3] /= (scale + 1e-6)
+ 
+             elif self.use_model == 'depthanythingv3':
+-                results = self.backbone.inference_v2(image_14[None])
++                da3_start = (
++                    _profile_now(image_14.device)
++                    if profile_intermediate_features
++                    else None
++                )
++                image_14_batched = image_14.reshape(
++                    current_batch_size,
++                    T,
++                    3,
++                    H_14,
++                    W_14,
++                )
++                results = self.backbone.inference_v2(image_14_batched)
+                 world_points, points, camera_poses = process_geometry(
+                     results["depth"], results["extrinsics"], results["intrinsics"]
+                 )
++                points, world_points, camera_poses, scale = normalize_geometry_per_sample(
++                    points,
++                    world_points,
++                    camera_poses,
++                )
++                self._metric_scale = scale.detach()
++
++                # Keep the DA3 geometry contract batched above. Flatten B and T
++                # exactly once at the existing flow-feature boundary.
++                points = points.reshape(
++                    current_batch_size * T, 3, *points.shape[-2:]
++                )
++                world_points = world_points.reshape(
++                    current_batch_size * T, 3, *world_points.shape[-2:]
++                )
++                camera_poses = camera_poses.reshape(current_batch_size * T, 4, 4)
+                 global_features = [results['feats'][..., -self.dim_feature:]]
+-                mask = results["depth_conf"].transpose(0, 1)
++                if profile_intermediate_features:
++                    stage_timings['da3_geometry_backbone_to_latent_s'] = (
++                        _profile_now(image_14.device) - da3_start
++                    )
++                depth_conf = results["depth_conf"]
++                if depth_conf.ndim != 4:
++                    raise RuntimeError(
++                        "DepthAnythingV3 depth_conf must be [B,T,H,W], got "
++                        f"{tuple(depth_conf.shape)}"
++                    )
++                mask = depth_conf.reshape(-1, 1, *depth_conf.shape[-2:])
+                 self.mask_threshold = 2
+ 
+                 # Save DA3 intrinsics as normalized focal for downstream use.
+                 # normalized_focal = fx_px * 2 / diagonal_pixels
+                 da3_intrinsics = results["intrinsics"]  # (B, T, 3, 3)
+-                fx_px = da3_intrinsics[..., 0, 0].mean()
++                fx_px = da3_intrinsics[..., 0, 0].mean(dim=1)
+                 H14, W14 = results["depth"].shape[-2:]
+                 diag = (H14 ** 2 + W14 ** 2) ** 0.5
+                 self._da3_focal = (fx_px * 2 / diag).detach()
+ 
+-                # Scale normalization (save metric scale for recovery)
+-                scale = torch.norm(points, dim=1).mean()
+-                self._metric_scale = scale.detach()
+-                points = points / (scale + 1e-6)
+-                world_points = world_points / (scale + 1e-6)
+-                camera_poses[..., :3, 3] /= (scale + 1e-6)
+ 
+         # -----------------------------------------
+         # 3. Unified upsampling and post-processing
+@@ -1007,14 +1200,20 @@
+         # -----------------------------------------
+         # 5. Flow feature extraction (for_flow = True)
+         # -----------------------------------------
++        flow_feature_start = (
++            _profile_now(image_14.device)
++            if profile_intermediate_features
++            else None
++        )
+         with torch.autocast(device_type=image_14.device.type, dtype=torch.float16):
+-            flow_features = self.dot_fc1(global_features[-1].detach())    
++            geometry_latents = global_features[-1]
++            flow_features = self.dot_fc1(geometry_latents.detach())
+             flow_features = self.flow_aggregator(
+                 flow_features, image_14, patch_start_idx=self.patch_start_idx
+             )
+             
+             if self.use_3d:
+-                flow3d_features = self.dot_fc2(global_features[-1].detach())    
++                flow3d_features = self.dot_fc2(geometry_latents.detach())
+                 flow3d_features = self.flow_aggregator3d(
+                     flow3d_features, image_14, patch_start_idx=self.patch_start_idx
+                 )
+@@ -1046,8 +1245,12 @@
+             # Downsample point map for flow correlation computation
+             pm = F.interpolate(points, (flow_H, flow_W), mode='nearest')
+             pm = pm.reshape(-1, pm.shape[-3], pm.shape[-2], pm.shape[-1])
+-
+-        return (
++        if profile_intermediate_features:
++            stage_timings['flow_feature_build_from_geometry_latent_s'] = (
++                _profile_now(image_14.device) - flow_feature_start
++            )
++
++        outputs = (
+             fmaps.to(image.dtype), 
+             ctxfeat.to(image.dtype), 
+             fmaps3d_detail.to(image.dtype), 
+@@ -1057,6 +1260,12 @@
+             world_points, 
+             camera_poses
+         )
++        if return_intermediate_features:
++            return outputs + ({
++                'geometry_latents': geometry_latents,
++                'timings_s': stage_timings,
++            },)
++        return outputs
+ 
+ 
+     def forward(self, images, iters=4, sw=None, is_training=False, stride=None, tracking3d=False):
+@@ -1276,7 +1485,10 @@
+ 
+     def forward_sliding1(
+         self, images, iters=4, sw=None, is_training=False, 
+-        window_len=None, stride=None, tracking3d=False
++        window_len=None, stride=None, tracking3d=False,
++        return_intermediate_features=False,
++        stop_after_motion_latent=False,
++        profile_intermediate_features=False,
+     ):
+         """
+         Variant of forward pass using sliding window/pairwise estimation 
+@@ -1284,6 +1496,9 @@
+         """
+         B, T, C, H, W = images.shape
+         device = images.device
++        timing_acc = {} if return_intermediate_features else None
++        sliding_start = _profile_now(device) if profile_intermediate_features else None
++        normalize_start = sliding_start
+         images = images.to(torch.float16)
+         dtype = images.dtype
+ 
+@@ -1299,13 +1514,37 @@
+         _, _, H_pad, W_pad = images_.shape
+         C_flow, H8, W8 = self.flow_dim, H_pad // 8, W_pad // 8
+         C_ctx = 128
++        if profile_intermediate_features:
++            timing_acc['model_normalize_and_pad_s'] = _profile_now(device) - normalize_start
+ 
+         # Feature Extraction
+-        (fmaps, ctxfeats, fmaps3d_detail, pms, 
+-         points, masks, world_points, camera_poses) = self.get_fmaps(
+-            images_, B, T, sw, is_training
++        feature_start = _profile_now(device) if profile_intermediate_features else None
++        fmap_outputs = self.get_fmaps(
++            images_, B, T, sw, is_training,
++            return_intermediate_features=return_intermediate_features,
++            profile_intermediate_features=profile_intermediate_features,
+         )
+-        
++        if profile_intermediate_features:
++            timing_acc['feature_extraction_total_s'] = _profile_now(device) - feature_start
++        if return_intermediate_features:
++            (fmaps, ctxfeats, fmaps3d_detail, pms,
++             points, masks, world_points, camera_poses, intermediate_features) = fmap_outputs
++            geometry_latent_t = intermediate_features['geometry_latents'][
++                :, 0, self.patch_start_idx:
++            ]
++            if geometry_latent_t.shape[0] != B:
++                raise RuntimeError(
++                    "geometry_latent_t batch mismatch: "
++                    f"latent={tuple(geometry_latent_t.shape)}, expected batch={B}"
++                )
++            if profile_intermediate_features:
++                for key, value in intermediate_features.get('timings_s', {}).items():
++                    timing_acc[key] = timing_acc.get(key, 0.0) + float(value)
++        else:
++            (fmaps, ctxfeats, fmaps3d_detail, pms,
++             points, masks, world_points, camera_poses) = fmap_outputs
++
++        pairwise_start = _profile_now(device) if profile_intermediate_features else None
+         # Reshape to (B, T, C, H, W)
+         fmaps = fmaps.to(dtype).reshape(B, T, C_flow, H8, W8)
+         fmaps3d_detail = fmaps3d_detail.to(dtype).reshape(B, T, self.flow3d_dim, H8, W8)
+@@ -1321,12 +1560,14 @@
+         B_pair, T_pair = fmaps.shape[0], fmaps.shape[1]
+         
+         # --- Chunking along the Batch (B) dimension ---
+-        chunk_size = 12 
++        chunk_size = self.motion_chunk_size
+         num_chunks = (B_pair + chunk_size - 1) // chunk_size
+         
+         # Iteration history containers
+         all_flow_preds_chunks, all_visconf_preds_chunks = [], []
+         all_flow3d_preds_chunks = [] if tracking3d else None
++        motion_latent_chunks = [] if return_intermediate_features else None
++        motion_latent_iteration_indices = [] if return_intermediate_features else None
+         
+         # Final result containers
+         full_flows_list, full_visconfs_list = [], []
+@@ -1338,6 +1579,8 @@
+         masks_chunks = list(torch.split(masks, chunk_size, dim=0))
+         world_points_chunks = list(torch.split(world_points, chunk_size, dim=0))
+         camera_poses_chunks = list(torch.split(camera_poses, chunk_size, dim=0)) 
++        if profile_intermediate_features:
++            timing_acc['pairwise_prepare_s'] = _profile_now(device) - pairwise_start
+         
+         for i in range(num_chunks):
+             start_idx, end_idx = i * chunk_size, min((i + 1) * chunk_size, B_pair)
+@@ -1361,8 +1604,7 @@
+             f3d_init = torch.zeros((b_chunk, 3, H8, W8), dtype=dtype, device=device)
+             
+             # 4. Iterative Update
+-            (flow_preds, flow3d_preds, vis_preds, 
+-             _, _, _) = self.forward_window_unified(
++            window_outputs = self.forward_window_unified(
+                 fmap1_single=fmap_anchor_chunk, fmap2=fmaps_chunk[:, 1:2], 
+                 fmaps3d_detail1_single=fmaps3d_detail_anchor_chunk, 
+                 fmaps3d_detail2=fmaps3d_detail_chunk[:, 1:2],
+@@ -1370,8 +1612,29 @@
+                 flow2ds8=f2d_init, flow3ds8=f3d_init,
+                 cxt1_single=ctxfeat_anchor_chunk, cxt2=ctxfeats_chunk[:, 1:2],
+                 pm1_single=pm_anchor_chunk.detach(), pm2=pms_chunk[:, 1:2].detach(),
+-                is_training=is_training, tracking3d=tracking3d
+-            )
++                is_training=is_training, tracking3d=tracking3d,
++                return_intermediate_features=return_intermediate_features,
++                stop_after_motion_latent=stop_after_motion_latent,
++                profile_intermediate_features=profile_intermediate_features,
++            )
++            if return_intermediate_features:
++                (flow_preds, flow3d_preds, vis_preds,
++                 _, _, _, window_intermediate_features) = window_outputs
++                motion_latent_chunks.append(
++                    window_intermediate_features['motion_latent_last']
++                )
++                motion_latent_iteration_indices.append(
++                    window_intermediate_features['motion_latent_iteration_index']
++                )
++                if profile_intermediate_features:
++                    for key, value in window_intermediate_features.get('timings_s', {}).items():
++                        timing_acc[key] = timing_acc.get(key, 0.0) + float(value)
++                del flow_preds, flow3d_preds, vis_preds
++                del fmaps_chunk, ctxfeats_chunk, pms_chunk, fmaps3d_detail_chunk
++                continue
++            else:
++                (flow_preds, flow3d_preds, vis_preds,
++                 _, _, _) = window_outputs
+             
+             # 5. Result post-processing for current chunk
+             chunk_flow_preds, chunk_visconf_preds = [], []
+@@ -1407,7 +1670,38 @@
+                 all_flow3d_preds_chunks.append(chunk_flow3d_preds)
+ 
+             del fmaps_chunk, ctxfeats_chunk, pms_chunk, fmaps3d_detail_chunk
+-            torch.cuda.empty_cache()
++
++        if return_intermediate_features:
++            if profile_intermediate_features:
++                timing_acc['geometry_latent_to_last_motion_latent_s'] = (
++                    timing_acc.get('flow_feature_build_from_geometry_latent_s', 0.0)
++                    + timing_acc.get('pairwise_prepare_s', 0.0)
++                    + timing_acc.get('motion_window_total_s', 0.0)
++                )
++                timing_acc['forward_sliding1_total_s'] = (
++                    _profile_now(device) - sliding_start
++                )
++            return {
++                'geometry_latent_t': geometry_latent_t,
++                'motion_latent_t_to_target': torch.cat(motion_latent_chunks, 0),
++                'timings_s': timing_acc,
++                'intermediate_metadata': {
++                    'source_frame_index_in_pair': 0,
++                    'target_frame_index_in_pair': 1,
++                    'patch_start_idx': self.patch_start_idx,
++                    'geometry_latent_source': (
++                        "Track4World.forward_point -> DA3 inference_v2 results['feats'] "
++                        "-> global_features[-1][:, source_frame, patch_start_idx:]"
++                    ),
++                    'motion_latent_source': (
++                        "RelUpdate3D.forward last iterative update, self.head[:-1](head_input), "
++                        "immediately before final XYZ Conv2d"
++                    ),
++                    'motion_latent_iteration_indices': motion_latent_iteration_indices,
++                    'num_iterations': iters,
++                    'stop_after_motion_latent': stop_after_motion_latent,
++                },
++            }
+ 
+         # The loop runs num_chunks = ceil((T-1)/chunk_size) times, but points/masks/
+         # world_points/camera_poses are split into ceil(T/chunk_size) chunks. When
+@@ -1734,7 +2028,9 @@
+         self, fmap1_single, fmap2, visconfs8, iters=None, flow2ds8=None,
+         flow3ds8=None, cxt1_single=None, cxt2=None, pm1_single=None,
+         pm2=None, fmaps3d_detail1_single=None, fmaps3d_detail2=None, 
+-        is_training=False, tracking3d=False
++        is_training=False, tracking3d=False, return_intermediate_features=False,
++        stop_after_motion_latent=False,
++        profile_intermediate_features=False,
+     ):
+         """
+         Unified iterative flow update (RAFT-style).
+@@ -1742,6 +2038,7 @@
+         """
+         B, S, C_in, H8, W8 = fmap2.shape
+         dtype, device = fmap2.dtype, fmap2.device
++        window_start = _profile_now(device) if profile_intermediate_features else None
+         
+         # 1. Expand anchor features to match the sequence length (B*S)
+         fmap1 = fmap1_single.unsqueeze(1).repeat(1, S, 1, 1, 1)
+@@ -1784,9 +2081,18 @@
+ 
+         flow2d_predictions, visconf_predictions = [], []
+         flow3d_predictions = [] if tracking3d else None
++        motion_latent_last = None
++        motion_latent_iteration_index = None
++        loop_start = _profile_now(device) if profile_intermediate_features else None
+         
+         # --- Iterative Update Loop (GRU) ---
+         for itr in range(iters):
++            latent_only_last_iteration = (
++                tracking3d
++                and return_intermediate_features
++                and stop_after_motion_latent
++                and itr == iters - 1
++            )
+             flow2ds8, flow3ds8 = flow2ds8.detach(), flow3ds8.detach()
+             coords2 = (coords1 + flow2ds8).detach()
+             
+@@ -1830,7 +2136,11 @@
+                 flowfeat, ctxfeat, visconfs8, fea_corr, cxt_corr, motion2d, S
+             )
+             flow2d_update = self.flow_2d_head(flowfeat)
+-            visconf_update = self.flow_visconf_head(flowfeat)
++            visconf_update = (
++                None
++                if latent_only_last_iteration
++                else self.flow_visconf_head(flowfeat)
++            )
+             flow2ds8 = flow2ds8 + flow2d_update
+             
+             # Update 3D Flow if tracking is enabled
+@@ -1849,20 +2159,47 @@
+                     align_corners=True, padding_mode='border'
+                 )
+                 
+-                flow3d_update, fmaps3d_detail1 = self.flow3d_head(
++                flow3d_head_outputs = self.flow3d_head(
+                     flowfeat.detach(), fmaps3d_detail1, sampled_feature_pre, 
+                     sampled_feature, sampled_pm - sampled_pm_pre, 
+-                    pm_corr, motion3d, S
+-                )
++                    pm_corr, motion3d, S,
++                    return_motion_latent=return_intermediate_features,
++                    skip_flow3d_prediction=latent_only_last_iteration,
++                )
++                if return_intermediate_features:
++                    flow3d_update, fmaps3d_detail1, motion_latent_last = flow3d_head_outputs
++                    motion_latent_iteration_index = itr
++                else:
++                    flow3d_update, fmaps3d_detail1 = flow3d_head_outputs
++
++                if latent_only_last_iteration:
++                    timings_s = {}
++                    if profile_intermediate_features:
++                        timings_s = {
++                            'motion_iterative_loop_s': _profile_now(device) - loop_start,
++                            'motion_window_total_s': _profile_now(device) - window_start,
++                        }
++                    return (
++                        [], [], [],
++                        flow2ds8, flow3ds8, flowfeat,
++                        {
++                            'motion_latent_last': motion_latent_last,
++                            'motion_latent_iteration_index': motion_latent_iteration_index,
++                            'timings_s': timings_s,
++                        },
++                    )
+                 flow3ds8 = flow3ds8 + flow3d_update
++
++            visconfs8 = visconfs8 + visconf_update
++
++            if return_intermediate_features and stop_after_motion_latent:
++                continue
+             
+             # Predict Upsampling Weights
+             temperature = 0.25 
+             weight_update = temperature * self.flow_upsample_weight(flowfeat)
+             if tracking3d:
+                 weight_update_3d = temperature * self.flow_3d_upsample_weight(fmaps3d_detail1)
+-            
+-            visconfs8 = visconfs8 + visconf_update
+ 
+             # Upsample and Collect Predictions
+             flow2d_predictions.append(
+@@ -1875,13 +2212,28 @@
+             visconf_predictions.append(
+                 self.upsample_data(visconfs8, weight_update, dim1=2)
+             )
+-            
+-            torch.cuda.empty_cache()
+-
+-        return (
++
++        if profile_intermediate_features:
++            loop_elapsed = _profile_now(device) - loop_start
++            window_elapsed = _profile_now(device) - window_start
++
++        outputs = (
+             flow2d_predictions, flow3d_predictions, visconf_predictions, 
+             flow2ds8, flow3ds8, flowfeat
+         )
++        if return_intermediate_features:
++            timings_s = {}
++            if profile_intermediate_features:
++                timings_s = {
++                    'motion_iterative_loop_s': loop_elapsed,
++                    'motion_window_total_s': window_elapsed,
++                }
++            return outputs + ({
++                'motion_latent_last': motion_latent_last,
++                'motion_latent_iteration_index': motion_latent_iteration_index,
++                'timings_s': timings_s,
++            },)
++        return outputs
+ 
+     # --- Helper Methods ---
+ 
+@@ -1943,7 +2295,16 @@
+             
+         return images, T, indices
+ 
+-    def get_fmaps(self, images_, B, T, sw, is_training):
++    def get_fmaps(
++        self,
++        images_,
++        B,
++        T,
++        sw,
++        is_training,
++        return_intermediate_features=False,
++        profile_intermediate_features=False,
++    ):
+         """
+         Extract feature maps for all frames.
+         Processes frames in chunks to manage memory usage.
+@@ -1966,18 +2327,31 @@
+         fmaps, fmaps3d_detail, ctxfeats = [], [], []
+         pms, points, masks = [], [], []
+         world_points, camera_poses = [], []
++        geometry_latents = [] if return_intermediate_features else None
++        timing_acc = {} if return_intermediate_features else None
+ 
+         # Iterate through chunks of frames along the time dimension
+         for t in range(0, T, fmaps_chunk_size):
+             images_chunk = images[:, t : t + fmaps_chunk_size]
+             
+             # Extract features and geometry via forward_point
+-            (f_c, c_c, f3d_c, pm_c, 
+-             pt_c, m_c, wp_c, cp_c) = self.forward_point(
++            point_outputs = self.forward_point(
+                 images_chunk, 
+                 current_batch_size=B, 
+-                for_flow=True
+-            )
++                for_flow=True,
++                return_intermediate_features=return_intermediate_features,
++                profile_intermediate_features=profile_intermediate_features,
++            )
++            if return_intermediate_features:
++                (f_c, c_c, f3d_c, pm_c,
++                 pt_c, m_c, wp_c, cp_c, point_intermediate_features) = point_outputs
++                geometry_latents.append(point_intermediate_features['geometry_latents'])
++                if profile_intermediate_features:
++                    for key, value in point_intermediate_features.get('timings_s', {}).items():
++                        timing_acc[key] = timing_acc.get(key, 0.0) + float(value)
++            else:
++                (f_c, c_c, f3d_c, pm_c,
++                 pt_c, m_c, wp_c, cp_c) = point_outputs
+             
+             # Append reshaped outputs
+             fmaps.append(f_c.reshape(B, -1, C, H8, W8))
+@@ -1999,8 +2373,14 @@
+         world_points = torch.cat(world_points, dim=1).reshape(-1, 3, H_pad, W_pad)
+         camera_poses = torch.cat(camera_poses, dim=1).reshape(-1, 4, 4)
+         
+-        return (fmaps, ctxfeats, fmaps3d_detail, pms, 
+-                points, masks, world_points, camera_poses)
++        outputs = (fmaps, ctxfeats, fmaps3d_detail, pms,
++                   points, masks, world_points, camera_poses)
++        if return_intermediate_features:
++            return outputs + ({
++                'geometry_latents': torch.cat(geometry_latents, dim=1),
++                'timings_s': timing_acc,
++            },)
++        return outputs
+ 
+     def upsample_data(self, flow, mask, dim1):
+         """
+@@ -2446,6 +2826,9 @@
+         no_shift: bool = False,
+         use_da3_focal: bool = True,
+         aligned_scene_flow: bool = True,
++        return_intermediate_features: bool = False,
++        stop_after_motion_latent: bool = False,
++        profile_intermediate_features: bool = False,
+     ) -> Dict[str, torch.Tensor]:
+         """
+         Pairwise inference function designed for consecutive-frame processing.
+@@ -2494,6 +2877,20 @@
+         # -------------------------------------------------------------
+         # Forward pass using a memory-efficient pairwise sliding window
+         # -------------------------------------------------------------
++        if return_intermediate_features:
++            if not tracking3d:
++                raise ValueError("return_intermediate_features=True requires tracking3d=True")
++            return self.forward_sliding1(
++                images,
++                iters=iters,
++                sw=sw,
++                is_training=is_training,
++                tracking3d=tracking3d,
++                return_intermediate_features=True,
++                stop_after_motion_latent=stop_after_motion_latent,
++                profile_intermediate_features=profile_intermediate_features,
++            )
++
+         (
+             flows_e,                 # (T-1, 2, H, W): 2D optical flow
+             visconf_maps_e,          # (T-1, 1, H, W): visibility / confidence
+--- a/track4world/nets/external/depth_anything_3/model/da3.py
++++ b/track4world/nets/external/depth_anything_3/model/da3.py
+@@ -25,8 +25,8 @@
+     apply_metric_scaling,
+     compute_alignment_mask,
+     compute_sky_mask,
+-    least_squares_scale_scalar,
+-    sample_tensor_for_quantile,
++    least_squares_scale_per_sample,
++    masked_quantile_per_sample,
+     set_sky_regions_to_max_depth,
+ )
+ from depth_anything_3.utils.geometry import affine_inverse, as_homogeneous, map_pdf_to_opacity
+@@ -187,27 +187,39 @@
+     def _process_mono_sky_estimation(
+         self, output: Dict[str, torch.Tensor]
+     ) -> Dict[str, torch.Tensor]:
+-        """Process mono sky estimation."""
++        """Process mono sky estimation independently for each batch sample."""
+         if "sky" not in output:
+             return output
+         non_sky_mask = compute_sky_mask(output.sky, threshold=0.3)
+-        if non_sky_mask.sum() <= 10:
+-            return output
+-        if (~non_sky_mask).sum() <= 10:
+-            return output
+-        
+-        non_sky_depth = output.depth[non_sky_mask]
+-        if non_sky_depth.numel() > 100000:
+-            idx = torch.randint(0, non_sky_depth.numel(), (100000,), device=non_sky_depth.device)
+-            sampled_depth = non_sky_depth[idx]
+-        else:
+-            sampled_depth = non_sky_depth
+-        non_sky_max = torch.quantile(sampled_depth, 0.99)
+-
+-        # Set sky regions to maximum depth and high confidence
+-        output.depth, _ = set_sky_regions_to_max_depth(
+-            output.depth, None, non_sky_mask, max_depth=non_sky_max
+-        )
++        flat_non_sky = non_sky_mask.reshape(non_sky_mask.shape[0], -1)
++        eligible = (flat_non_sky.sum(dim=1) > 10) & (
++            (~flat_non_sky).sum(dim=1) > 10
++        )
++        quantiles = torch.full(
++            (output.depth.shape[0],),
++            0.0,
++            dtype=torch.float32,
++            device=output.depth.device,
++        )
++        depth = output.depth.clone()
++        for batch_index in torch.nonzero(eligible, as_tuple=False).flatten().tolist():
++            row_quantile = masked_quantile_per_sample(
++                output.depth[batch_index : batch_index + 1],
++                non_sky_mask[batch_index : batch_index + 1],
++                0.99,
++                max_samples=100000,
++            )
++            row_depth, _ = set_sky_regions_to_max_depth(
++                output.depth[batch_index : batch_index + 1],
++                None,
++                non_sky_mask[batch_index : batch_index + 1],
++                max_depth=row_quantile,
++            )
++            depth[batch_index].copy_(row_depth[0])
++            quantiles[batch_index] = row_quantile[0]
++        output.depth = depth
++        output.mono_sky_depth_99_quantile = quantiles
++        output.mono_sky_processed_mask = eligible
+         return output
+ 
+     def _process_ray_pose_estimation(
+@@ -417,33 +429,62 @@
+     def _apply_depth_alignment(
+         self, output: Dict[str, torch.Tensor], metric_output: Dict[str, torch.Tensor]
+     ) -> Dict[str, torch.Tensor]:
+-        """Apply depth alignment using least squares scaling."""
++        """Apply one independent depth alignment for each batch sample."""
+         # Compute non-sky mask
+         non_sky_mask = compute_sky_mask(metric_output.sky, threshold=0.3)
+ 
+-        # Ensure we have enough non-sky pixels
+-        assert non_sky_mask.sum() > 10, "Insufficient non-sky pixels for alignment"
+-
+-        # Sample depth confidence for quantile computation
+-        depth_conf_ns = output.depth_conf[non_sky_mask]
+-        depth_conf_sampled = sample_tensor_for_quantile(depth_conf_ns, max_samples=100000)
+-        median_conf = torch.quantile(depth_conf_sampled, 0.5)
+-
+-        # Compute alignment mask
++        # Views and pixels are pooled within a sample, never across batch rows.
++        non_sky_counts = non_sky_mask.reshape(non_sky_mask.shape[0], -1).sum(dim=1)
++        insufficient = torch.nonzero(non_sky_counts <= 10, as_tuple=False).flatten()
++        if insufficient.numel():
++            rows = [int(value) for value in insufficient.detach().cpu().tolist()]
++            raise ValueError(
++                "Insufficient non-sky pixels for alignment in batch rows "
++                f"{rows}; counts={non_sky_counts.detach().cpu().tolist()}"
++            )
++
++        # One deterministic confidence median per sample over its T/H/W values.
++        median_conf = masked_quantile_per_sample(
++            output.depth_conf,
++            non_sky_mask,
++            0.5,
++            max_samples=100000,
++        )
++
++        # The per-sample median is broadcast only inside its own batch row.
+         align_mask = compute_alignment_mask(
+             output.depth_conf, non_sky_mask, output.depth, metric_output.depth, median_conf
+         )
+-
+-        # Compute scale factor using least squares
+-        valid_depth = output.depth[align_mask]
+-        valid_metric_depth = metric_output.depth[align_mask]
+-        scale_factor = least_squares_scale_scalar(valid_metric_depth, valid_depth)
+-
+-        # Apply scaling to depth and extrinsics
+-        output.depth *= scale_factor
+-        output.extrinsics[:, :, :3, 3] *= scale_factor
++        alignment_counts = align_mask.reshape(align_mask.shape[0], -1).sum(dim=1)
++        empty_alignment = torch.nonzero(
++            alignment_counts == 0, as_tuple=False
++        ).flatten()
++        if empty_alignment.numel():
++            rows = [int(value) for value in empty_alignment.detach().cpu().tolist()]
++            raise ValueError(f"No valid depth-alignment pixels in batch rows {rows}")
++
++        # One least-squares metric scale per sample over all valid views/pixels.
++        scale_factor = least_squares_scale_per_sample(
++            metric_output.depth,
++            output.depth,
++            align_mask,
++        )
++
++        # Apply each scale only to its own sample.
++        depth_scale = scale_factor.to(output.depth).reshape(
++            scale_factor.shape[0], *([1] * (output.depth.ndim - 1))
++        )
++        pose_scale = scale_factor.to(output.extrinsics).reshape(-1, 1, 1)
++        output.depth = output.depth * depth_scale
++        output.extrinsics = output.extrinsics.clone()
++        output.extrinsics[:, :, :3, 3] = (
++            output.extrinsics[:, :, :3, 3] * pose_scale
++        )
+         output.is_metric = 1
+-        output.scale_factor = scale_factor.item()
++        output.scale_factor = scale_factor
++        output.alignment_median_conf = median_conf
++        output.alignment_mask = align_mask
++        output.alignment_valid_count = alignment_counts
+ 
+         return output
+ 
+@@ -456,19 +497,21 @@
+         """Handle sky regions by setting them to maximum depth."""
+         non_sky_mask = compute_sky_mask(metric_output.sky, threshold=0.3)
+ 
+-        # Compute maximum depth for non-sky regions
+-        # Use sampling to safely compute quantile on large tensors
+-        non_sky_depth = output.depth[non_sky_mask]
+-        if non_sky_depth.numel() > 100000:
+-            idx = torch.randint(0, non_sky_depth.numel(), (100000,), device=non_sky_depth.device)
+-            sampled_depth = non_sky_depth[idx]
+-        else:
+-            sampled_depth = non_sky_depth
+-        non_sky_max = min(torch.quantile(sampled_depth, 0.99), sky_depth_def)
++        # One deterministic 99th percentile per sample; cap only after the
++        # per-sample quantile has been computed.
++        non_sky_quantile = masked_quantile_per_sample(
++            output.depth,
++            non_sky_mask,
++            0.99,
++            max_samples=100000,
++        )
++        non_sky_max = non_sky_quantile.clamp_max(float(sky_depth_def))
+ 
+         # Set sky regions to maximum depth and high confidence
+         output.depth, output.depth_conf = set_sky_regions_to_max_depth(
+             output.depth, output.depth_conf, non_sky_mask, max_depth=non_sky_max
+         )
+-
+-        return output
++        output.sky_depth_99_quantile = non_sky_quantile
++        output.sky_fill_depth = non_sky_max
++
++        return output
+--- a/track4world/nets/external/depth_anything_3/utils/alignment.py
++++ b/track4world/nets/external/depth_anything_3/utils/alignment.py
+@@ -17,6 +17,7 @@
+ """
+ 
+ from typing import Tuple
++
+ import torch
+ 
+ 
+@@ -49,6 +50,38 @@
+     num = torch.dot(a.reshape(-1), b.reshape(-1))
+     den = torch.dot(b.reshape(-1), b.reshape(-1)).clamp_min(eps)
+     return num / den
++
++
++def least_squares_scale_per_sample(
++    a: torch.Tensor,
++    b: torch.Tensor,
++    mask: torch.Tensor,
++    eps: float = 1e-12,
++) -> torch.Tensor:
++    """Compute one least-squares scale for every leading batch sample.
++
++    All remaining dimensions (views and pixels) belong to that sample. Masked
++    values are replaced before multiplication so NaN/Inf outside the alignment
++    mask cannot poison an otherwise valid sample.
++    """
++    if a.shape != b.shape or a.shape != mask.shape:
++        raise ValueError(
++            "a, b and mask must have identical shapes, got "
++            f"a={tuple(a.shape)}, b={tuple(b.shape)}, mask={tuple(mask.shape)}"
++        )
++    if a.ndim < 2:
++        raise ValueError(f"per-sample least squares requires [B,...], got {a.shape}")
++    if a.device != b.device or a.device != mask.device:
++        raise ValueError("a, b and mask must be on the same device")
++    if not a.is_floating_point() or not b.is_floating_point():
++        raise TypeError("a and b must be floating point tensors")
++
++    valid = mask.bool().reshape(mask.shape[0], -1)
++    a_values = torch.where(valid, a.float().reshape(a.shape[0], -1), 0.0)
++    b_values = torch.where(valid, b.float().reshape(b.shape[0], -1), 0.0)
++    numerator = (a_values * b_values).sum(dim=1)
++    denominator = b_values.square().sum(dim=1).clamp_min(float(eps))
++    return numerator / denominator
+ 
+ 
+ def compute_sky_mask(sky_prediction: torch.Tensor, threshold: float = 0.3) -> torch.Tensor:
+@@ -89,8 +122,18 @@
+     Returns:
+         Boolean mask for valid alignment regions
+     """
++    threshold = median_conf
++    if threshold.ndim == 1:
++        if threshold.shape[0] != depth_conf.shape[0]:
++            raise ValueError(
++                "per-sample median_conf must match the batch dimension, got "
++                f"median={tuple(threshold.shape)}, depth_conf={tuple(depth_conf.shape)}"
++            )
++        threshold = threshold.reshape(
++            threshold.shape[0], *([1] * (depth_conf.ndim - 1))
++        )
+     return (
+-        (depth_conf >= median_conf)
++        (depth_conf >= threshold)
+         & non_sky_mask
+         & (metric_depth > min_metric_depth_threshold)
+         & (depth > min_depth_threshold)
+@@ -108,11 +151,55 @@
+     Returns:
+         Sampled tensor
+     """
++    if max_samples <= 0:
++        raise ValueError(f"max_samples must be positive, got {max_samples}")
+     if tensor.numel() <= max_samples:
+         return tensor
+ 
+-    idx = torch.randperm(tensor.numel(), device=tensor.device)[:max_samples]
+-    return tensor.flatten()[idx]
++    # Deterministic, evenly spaced sampling makes the same sample invariant to
++    # whether it is evaluated alone or as one row of a larger batch.
++    flat = tensor.flatten()
++    idx = (
++        torch.arange(max_samples, device=tensor.device, dtype=torch.int64)
++        * flat.numel()
++        // max_samples
++    )
++    return flat.index_select(0, idx)
++
++
++def masked_quantile_per_sample(
++    tensor: torch.Tensor,
++    mask: torch.Tensor,
++    quantile: float,
++    *,
++    max_samples: int | None = 100000,
++) -> torch.Tensor:
++    """Compute one masked quantile per batch row over all remaining axes."""
++    if tensor.shape != mask.shape:
++        raise ValueError(
++            "tensor and mask must have identical shapes, got "
++            f"tensor={tuple(tensor.shape)}, mask={tuple(mask.shape)}"
++        )
++    if tensor.ndim < 2:
++        raise ValueError(f"per-sample quantile requires [B,...], got {tensor.shape}")
++    if not 0.0 <= float(quantile) <= 1.0:
++        raise ValueError(f"quantile must lie in [0,1], got {quantile}")
++
++    values = []
++    for batch_index in range(tensor.shape[0]):
++        selected = tensor[batch_index][mask[batch_index].bool()]
++        if selected.numel() == 0:
++            raise ValueError(
++                f"sample {batch_index} has no valid values for quantile {quantile}"
++            )
++        if max_samples is not None:
++            if max_samples <= 0:
++                raise ValueError(f"max_samples must be positive, got {max_samples}")
++            selected = sample_tensor_for_quantile(
++                selected, max_samples=int(max_samples)
++            )
++        values.append(torch.quantile(selected.float(), float(quantile)))
++    return torch.stack(values, dim=0)
+ 
+ 
+ def apply_metric_scaling(
+@@ -135,10 +222,10 @@
+ 
+ def set_sky_regions_to_max_depth(
+     depth: torch.Tensor,
+-    depth_conf: torch.Tensor,
++    depth_conf: torch.Tensor | None,
+     non_sky_mask: torch.Tensor,
+-    max_depth: float = 200.0,
+-) -> Tuple[torch.Tensor, torch.Tensor]:
++    max_depth: float | torch.Tensor = 200.0,
++) -> Tuple[torch.Tensor, torch.Tensor | None]:
+     """
+     Set sky regions to maximum depth and high confidence.
+ 
+@@ -151,13 +238,24 @@
+     Returns:
+         Tuple of (updated_depth, updated_depth_conf)
+     """
+-    depth = depth.clone()
+-
+-    # Set sky regions to max depth and high confidence
+-    depth[~non_sky_mask] = max_depth
++    fill_depth = torch.as_tensor(max_depth, device=depth.device, dtype=depth.dtype)
++    if fill_depth.ndim == 1:
++        if fill_depth.shape[0] != depth.shape[0]:
++            raise ValueError(
++                "per-sample max_depth must match batch size, got "
++                f"max_depth={tuple(fill_depth.shape)}, depth={tuple(depth.shape)}"
++            )
++        fill_depth = fill_depth.reshape(
++            fill_depth.shape[0], *([1] * (depth.ndim - 1))
++        )
++
++    # torch.where supports a different fill value for every batch sample.
++    depth = torch.where(non_sky_mask, depth, fill_depth)
+     if depth_conf is not None:
+-        depth_conf = depth_conf.clone()
+-        depth_conf[~non_sky_mask] = 1.0
++        depth_conf = torch.where(
++            non_sky_mask,
++            depth_conf,
++            torch.ones((), device=depth_conf.device, dtype=depth_conf.dtype),
++        )
+         return depth, depth_conf
+-    else:
+-        return depth, None
++    return depth, None
+--- a/track4world/nets/external/depth_anything_3/api.py
++++ b/track4world/nets/external/depth_anything_3/api.py
+@@ -38,12 +38,22 @@
+ from depth_anything_3.cfg import create_object, load_config
+ from depth_anything_3.registry import MODEL_REGISTRY
+ from depth_anything_3.specs import Prediction
+-from depth_anything_3.utils.export import export
+ from depth_anything_3.utils.geometry import affine_inverse
+ from depth_anything_3.utils.io.input_processor import InputProcessor
+ from depth_anything_3.utils.io.output_processor import OutputProcessor
+ from depth_anything_3.utils.logger import logger
+-from depth_anything_3.utils.pose_align import align_poses_umeyama
++
++# Visualization and trajectory alignment are not used by the training teacher.
++# Keep these optional dependencies lazy for callers of the inference/export API.
++def export(*args, **kwargs):
++    from depth_anything_3.utils.export import export as implementation
++    return implementation(*args, **kwargs)
++
++
++def align_poses_umeyama(*args, **kwargs):
++    from depth_anything_3.utils.pose_align import align_poses_umeyama as implementation
++    return implementation(*args, **kwargs)
++
+ 
+ torch.backends.cudnn.benchmark = False
+ # logger.info("CUDNN Benchmark Disabled")

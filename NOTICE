@@ -1,0 +1,27 @@
+MagicW0
+
+The existing rotation helpers in eval/robodojo/rotation6d.py retain their
+Apache-2.0 notice. See LICENSES/Apache-2.0.txt for the license text.
+
+Qwen3.5 assets retain their upstream LICENSE when prepared. RoboDojo/XPolicyLab
+and their simulator dependencies are external components with their own licenses.
+The repository's MIT license does not replace those notices or licenses.
+
+Training data readers, the training framework, and utility files that carry
+MagicVLA / MagicMix Apache-2.0 headers retain those headers and the Apache-2.0
+license in LICENSES/Apache-2.0.txt. See the headers of individual files.
+
+Training uses external Track4World, Depth Anything 3, DINOv3, Qwen3.5 and FAST
+resources. These resources and their weights are not bundled in this release;
+their original terms and notices apply. Track4World is prepared separately
+following docs/training.md.
+
+src/magic_w0/models/action_backbone/fast_action_tokenizer.py adapts the
+Physical Intelligence / Hugging Face UniversalActionProcessor under Apache-2.0.
+Its original copyright and license notice are retained in that file.
+
+third_party/track4world-magicw0.patch modifies Track4World and its vendored
+Depth Anything 3 implementation. Track4World's original license is reproduced
+in LICENSES/Track4World.txt; Depth Anything 3 retains its Apache-2.0 notices.
+The prepared source retains all upstream notices. The patch is not relicensed
+under the repository's MIT license.

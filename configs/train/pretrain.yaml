@@ -1,0 +1,25 @@
+# Example multi-source run; replace template sources and tune hyperparameters.
+# This is not the original pretraining mixture or experiment configuration.
+include: [model.yaml, data/pretrain.yaml]
+model:
+  params:
+    vlm_checkpoint: ${MAGIC_W0_MODEL_ROOT:-checkpoints}/Qwen3.5-2B
+    history_enabled: false
+    knowledge_insulation: true
+    use_fast_action_tokens: true
+    fast_ce_loss_weight: 0.1
+training:
+  strategy: {strategy: ddp, backend: nccl, use_amp: true, bf16: true}
+  max_steps: 1000
+  learning_rate: 0.0001
+  weight_decay: 0.01
+  optimizer: {type: adamw}
+  scheduler: {name: cosine, warmup_ratio: 0.05, total_steps: 1000}
+  grad_clip_norm: 1.0
+  find_unused_parameters: true
+  eval_every_steps: 0
+  save_every_steps: 500
+  keep_last_n_checkpoints: 2
+  save_every_epochs: null
+  wandb: {enabled: false}
+  output_dir: outputs/pretrain

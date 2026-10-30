@@ -1,0 +1,19 @@
+# Example fine-tuning run; hyperparameters are illustrative, not the paper recipe.
+include: [model.yaml, data/robodojo.yaml]
+model:
+  checkpoint: ${MAGIC_W0_MODEL_ROOT:-checkpoints}/pretrain_models/magic_w0_pretrain.pt
+training:
+  strategy: {strategy: ddp, backend: nccl, use_amp: true, bf16: true}
+  max_steps: 1000
+  learning_rate: 0.0001
+  weight_decay: 0.01
+  optimizer: {type: adamw}
+  scheduler: {name: cosine, warmup_ratio: 0.05, total_steps: 1000}
+  grad_clip_norm: 1.0
+  find_unused_parameters: true
+  eval_every_steps: 0
+  save_every_steps: 500
+  keep_last_n_checkpoints: 2
+  save_every_epochs: null
+  wandb: {enabled: false}
+  output_dir: outputs/robodojo_sft

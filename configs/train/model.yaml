@@ -1,0 +1,35 @@
+# Minimal MagicW0 example, not the original experiment configuration.
+# Structural dimensions and history settings remain compatible with released weights.
+model:
+  name: magic_w0
+  local_files_only: true
+  strict: true
+  params:
+    vlm_checkpoint: ${MAGIC_W0_MODEL_ROOT:-checkpoints}/qwen3.5-2b-assets
+    dtype: bfloat16
+    attention_implementation: sdpa
+    gradient_checkpointing: true
+    action_dim: 34
+    state_dim: 34
+    chunk_size: 50
+    camera_keys: [observation.images.cam_high, observation.images.cam_left_wrist, observation.images.cam_right_wrist]
+    state_prompt_mode: embedding
+    robot_prompt_metadata: 'Robot action space: {action_space}.{joint_dimensions}'
+    history_enabled: true
+    history_frames: 25
+    history_interval: 20
+    history_pool_size: 4
+    knowledge_insulation: false
+    use_fast_action_tokens: false
+    cotrain_vlm_modalities: []
+    # Illustrative loss weights; tune for your data and objective.
+    flow_matching_loss_weight: 1.0
+    fast_ce_loss_weight: 0.0
+    gen_2d_loss_weight: 0.1
+    world_3d_loss_weight: 0.1
+    dinov3_checkpoint: ${MAGIC_W0_MODEL_ROOT:-checkpoints}/third_party_models/dinov3-vitl16-pretrain-lvd1689m
+    track4world_project_root: third_party/Track4World
+    track4world_ckpt: ${MAGIC_W0_MODEL_ROOT:-checkpoints}/third_party_models/track4world_da3.pth
+    track4world_da3_backbone_path: ${MAGIC_W0_MODEL_ROOT:-checkpoints}/third_party_models/DA3NESTED-GIANT-LARGE-1.1
+    track4world_convnext_tiny_weights_path: ${MAGIC_W0_MODEL_ROOT:-checkpoints}/third_party_models/convnext_tiny-983f1562.pth
+    fast_tokenizer_path: ${MAGIC_W0_MODEL_ROOT:-checkpoints}/fast_tokenizer

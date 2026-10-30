@@ -1,0 +1,29 @@
+{
+  "repository": "https://github.com/TencentARC/Track4World",
+  "revision": "fbd59ffadf2de9fccba5ea017e13af239075fbe9",
+  "archive_sha256": "2453052b91dab223cffcce2abd458a8f69468c3e676d83bdc36c127529d27296",
+  "files": {
+    "track4world/nets/blocks.py": {
+      "upstream": "bcee0f8a1104db9e87bb2500c4df9ba2b20d3f0770f1348dd66ed805c285a550",
+      "patched": "a167898a81d69eb5029a72e3076c83227a40e06b8ad2ee528dd3325bcbbe24f6"
+    },
+    "track4world/nets/model.py": {
+      "upstream": "b8c66abce259675b6b1bcc9c182f670a681f3d39609488ecfb593d9564e711a5",
+      "patched": "eaf3e66296557ed4a05b6723a8f1e3d8495db67e62b765f6138a95f78c7ed0c8"
+    },
+    "track4world/nets/external/depth_anything_3/model/da3.py": {
+      "upstream": "aa1a134ac2cdac3d5ef7630bca22eeacb47a99b3e81a97a2a62d65968b1739f5",
+      "patched": "24e794093200326429bfdee297dc212544954071a703007cea99431bf171a111"
+    },
+    "track4world/nets/external/depth_anything_3/utils/alignment.py": {
+      "upstream": "7a18fe1c050e42970c7e243adb073ca695e24d197f671d74d16655760a827a88",
+      "patched": "60bbf28be47606d4fb37ff6bd902402fcca7c20e6fed598adeff0453b7f0a2b0"
+    },
+    "track4world/nets/external/depth_anything_3/api.py": {
+      "upstream": "7180ec69147381edbd2fd5184188c5b292eaa03b18429f605ce397a2ebe32bde",
+      "patched": "82b8b9f9bd665e0392691d60f0cc989195b65dd931069617dc40afa8c1e65871"
+    }
+  },
+  "utils3d_revision": "2072c024c73f7c0f83e0da23eef5f2d9ac575249",
+  "utils3d_archive_sha256": "887380ca17443c000d79c591d2ce8b152e922b603120bac14623eac9e04c967e"
+}
